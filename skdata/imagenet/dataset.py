@@ -177,8 +177,8 @@ class IMAGENET():
                                                 file_names)
 
 
-class cache:
-    def init(self, path, cache_set=None):
+class cache():
+    def __init__(self, path, cache_set=None):
         self.path = path
         if cache_set is None:
             try:
