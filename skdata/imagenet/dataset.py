@@ -13,14 +13,15 @@ import tabular as tb
 import Image
 import ImageOps
 import skdata.larray as larray
+import cPickle
+import fnmatch
+
+IMG_SOURCE = 'ardila@mh17.mit.edu:~/imagenet/'
 
 
 class IMAGENET():
-    def __init__(self, path=None):
-        if path is None:
-            print "Please download data using one of the fetch methods"
-        else:
-            self.path = path
+    def __init__(self, path=os.path.expanduser('~/.skdata/imagenet')):
+        self.img_cache = cache(path)
 
     @property
     def meta(self):
@@ -159,7 +160,6 @@ class IMAGENET():
         wnids = set(wnids) - set(synsets_not_ready_yet)
         self.fetch(wnids, seed=seed, num_per_synset=num_per_synset, path=path, firstonly=firstonly)
 
-
     def get_images(self, resize_to=(256, 256), mode='L', dtype='float32',
                    crop=None, mask=None, normalize=True):
         """
@@ -171,23 +171,61 @@ class IMAGENET():
         crop: array of [minx, maxx, miny, maxy] crop box applied after resize
         normalize: If true, then the image set to zero mean and unit standard deviation
         """
-        full_paths = [self.path + '/' + filename for filename in self.meta['filename']]
-        return larray.lmap(ImgLoaderResizer(resize_to=resize_to, dtype=dtype, normalize=normalize,
-                                            crop=crop, mask=mask, mode=mode), full_paths)
+        file_names = [filename for filename in self.meta['filename']]
+        return larray.lmap(ImgDownloaderResizer(resize_to=resize_to, dtype=dtype, normalize=normalize,
+                                                crop=crop, mask=mask, mode=mode, cache=self.img_cache),
+                                                file_names)
 
 
-class ImgLoaderResizer(object):
+class cache:
+    def init(self, path, cache_set=None):
+        self.path = path
+        if cache_set is None:
+            try:
+                self.set = cPickle.load(open(os.path.join(path, 'cached_set.p'), 'rb'))
+            except IOError:
+                self.set = set([filename for filename in os.listdir(path) if fnmatch.fnmatch(filename, '*.jpg')])
+
+    def save(self):
+        cPickle.dump(self.set, open(os.path.join(self.path, 'cached_set.p'), 'wb'))
+
+
+def download_image_to_folder(filename, folder, source=IMG_SOURCE):
+    command = 'rsync -az '+source+filename+' '+folder
+    os.system(command)
+
+
+def download_image_to_cache(filename, cache, source):
     """
-    Class used to lazily evaluate resizing/other pre-processing and loading image from file in an larray
+    Downloads the image to the cache
+    :param filename: filename of image to download
+    :param cache: a cache object that has a set attribute describing which images have been downloaded, and a directory
+     where the images are stored
+    :param source: string
+    :return: full path
+    """
+    if filename not in cache.set:
+        download_image_to_folder(filename, cache.path, source)
+        cache.set.update(filename)
+        cache.save()
+    return cache.folder+filename
+
+
+class ImgDownloaderResizer(object):
+    """
+    Class used to lazily downloading images to a cache, evaluating resizing/other pre-processing
+    and loading image from file in an larray
     """
 
     def __init__(self,
+                 cache,
                  resize_to=None,
-                 dtype='float32', # We should think about uint8 for images!#
+                 dtype='float32',
                  normalize=True,
                  crop=None,
                  mask=None,
-                 mode='L'):
+                 mode='L',
+                 ):
         assert len(resize_to) == 2, "Image size must be specified by 2 numbers"
         resize_to = tuple(resize_to)
         self.resize_to = resize_to
@@ -210,6 +248,7 @@ class ImgLoaderResizer(object):
         self.normalize = normalize
         self.mask = mask
         self.mode = mode
+        self.cache = cache
 
     def rval_getattr(self, attr, objs):
         if attr == 'shape' and self.shape is not None:
@@ -220,7 +259,8 @@ class ImgLoaderResizer(object):
             return self.dtype
         raise AttributeError(attr)
 
-    def __call__(self, file_path):
+    def __call__(self, file_name):
+        file_path = download_image_to_cache(file_name, self.cache)
         im = Image.open(file_path)
         if im.mode != self.mode:
             im = im.convert(self.mode)
